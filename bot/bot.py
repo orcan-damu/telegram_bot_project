@@ -1,12 +1,13 @@
 import os
 from datetime import datetime
-from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackQueryHandler
 import speech_recognition as sr
 from pydub import AudioSegment
 
-# Global variable to keep track of the serial number
+# Global variables
 serial_number = 0
+transcriptions = {}  # Stores transcriptions with unique IDs
 
 async def handle_voice(update: Update, context):
     global serial_number
@@ -52,9 +53,68 @@ async def handle_voice(update: Update, context):
     with open(text_path, "w", encoding="utf-8") as text_file:  # Use UTF-8 encoding
         text_file.write(text)
 
-    # Send the transcribed text back to the user
-    response = f"Folder: {folder_name}\n\nTranscribed Text:\n{text}"
-    await update.message.reply_text(response)
+    # Store transcription in the global dictionary
+    transcription_id = f"trans_{serial_number}"
+    transcriptions[transcription_id] = {
+        "folder_name": folder_name,
+        "text": text,
+        "text_path": text_path
+    }
+
+    # Send the transcribed text back to the user with an inline keyboard
+    keyboard = [
+        [InlineKeyboardButton("Edit Transcription", callback_data=f"edit_{transcription_id}")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text(
+        f"Folder: {folder_name}\n\nTranscribed Text:\n{text}",
+        reply_markup=reply_markup
+    )
 
 async def start(update: Update, context):
     await update.message.reply_text("Send me a voice message, and I'll transcribe it for you!")
+
+async def handle_button_click(update: Update, context):
+    query = update.callback_query
+    await query.answer()
+
+    # Extract the action and transcription_id from the callback data
+    # Split on the first underscore only
+    try:
+        action, transcription_id = query.data.split("_", 1)
+    except ValueError:
+        await query.edit_message_text("Invalid button action. Please try again.")
+        return
+
+    transcription = transcriptions.get(transcription_id)
+
+    if action == "edit":
+        if transcription:
+            # Ask the user to send the edited text
+            await query.edit_message_text(
+                f"Current Transcription:\n{transcription['text']}\n\nPlease reply with the edited text."
+            )
+            # Store the transcription ID in the user's context for later use
+            context.user_data["editing_transcription_id"] = transcription_id
+        else:
+            await query.edit_message_text("Transcription not found. Please try again.")
+
+async def handle_text(update: Update, context):
+    # Check if the user is editing a transcription
+    if "editing_transcription_id" in context.user_data:
+        transcription_id = context.user_data["editing_transcription_id"]
+        transcription = transcriptions.get(transcription_id)
+
+        if transcription:
+            # Save the edited text
+            edited_text = update.message.text
+            transcription["text"] = edited_text
+            with open(transcription["text_path"], "w", encoding="utf-8") as text_file:
+                text_file.write(edited_text)
+
+            # Notify the user
+            await update.message.reply_text("Transcription updated successfully!")
+            # Clear the editing state
+            del context.user_data["editing_transcription_id"]
+    else:
+        await update.message.reply_text("Send me a voice message to transcribe it!")
